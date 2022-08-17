@@ -1,4 +1,4 @@
-name: socket_io_client
+name: old_socket_io_client
 description: Dartlang port of socket.io-client for web, flutter, dartvm to use
 version: 1.0.2
 homepage: https://www.zkoss.org
