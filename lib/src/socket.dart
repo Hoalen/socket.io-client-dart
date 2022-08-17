@@ -14,8 +14,8 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 import 'package:old_socket_io_client/src/manager.dart';
 import 'package:old_socket_io_client/src/on.dart' as util;
-import 'package:socket_io_common/src/parser/parser.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
+import 'package:old_socket_io_common/src/parser/parser.dart';
+import 'package:old_socket_io_common/src/util/event_emitter.dart';
 
 ///
 /// Internal events (blacklisted).

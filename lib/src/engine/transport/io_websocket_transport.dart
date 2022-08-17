@@ -10,7 +10,7 @@ import 'dart:typed_data';
 import 'package:logging/logging.dart';
 import 'package:old_socket_io_client/src/engine/parseqs.dart';
 import 'package:old_socket_io_client/src/engine/transport/transport.dart';
-import 'package:socket_io_common/src/engine/parser/parser.dart';
+import 'package:old_socket_io_common/src/engine/parser/parser.dart';
 
 class IOWebSocketTransport extends Transport {
   static final Logger _logger =

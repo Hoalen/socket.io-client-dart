@@ -9,8 +9,8 @@ import 'package:old_socket_io_client/src/engine/socket.dart' as engine_socket;
 import 'package:old_socket_io_client/src/on.dart';
 import 'package:old_socket_io_client/src/on.dart' as util;
 import 'package:old_socket_io_client/src/socket.dart';
-import 'package:socket_io_common/src/parser/parser.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
+import 'package:old_socket_io_common/src/parser/parser.dart';
+import 'package:old_socket_io_common/src/util/event_emitter.dart';
 
 final Logger _logger = Logger('old_socket_io_client:Manager');
 

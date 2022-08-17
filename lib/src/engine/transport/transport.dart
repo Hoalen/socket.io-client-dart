@@ -3,8 +3,8 @@
 /// Author: jumperchen<jumperchen@potix.com>
 import 'package:logging/logging.dart';
 import 'package:old_socket_io_client/src/engine/socket.dart';
-import 'package:socket_io_common/src/engine/parser/parser.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
+import 'package:old_socket_io_common/src/engine/parser/parser.dart';
+import 'package:old_socket_io_common/src/util/event_emitter.dart';
 
 abstract class Transport extends EventEmitter {
   static final Logger _logger =

@@ -3,7 +3,7 @@
 // Author: jumperchen<jumperchen@potix.com>
 
 import 'package:old_socket_io_client/socket_io_client.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
+import 'package:old_socket_io_common/src/util/event_emitter.dart';
 
 /// Option Builder to help developer to construct an options map.
 class OptionBuilder {

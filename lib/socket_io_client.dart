@@ -17,7 +17,7 @@ import 'package:logging/logging.dart';
 import 'package:old_socket_io_client/src/engine/parseqs.dart';
 import 'package:old_socket_io_client/src/manager.dart';
 import 'package:old_socket_io_client/src/socket.dart';
-import 'package:socket_io_common/src/engine/parser/parser.dart' as parser;
+import 'package:old_socket_io_common/src/engine/parser/parser.dart' as parser;
 
 export 'package:old_socket_io_client/src/darty.dart';
 export 'package:old_socket_io_client/src/socket.dart';
