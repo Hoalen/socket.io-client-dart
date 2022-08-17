@@ -5,15 +5,16 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+
 //import 'dart:html';
 import 'package:logging/logging.dart';
-import 'package:socket_io_client/src/engine/transport/transport.dart';
+import 'package:old_socket_io_client/src/engine/parseqs.dart';
+import 'package:old_socket_io_client/src/engine/transport/transport.dart';
 import 'package:socket_io_common/src/engine/parser/parser.dart';
-import 'package:socket_io_client/src/engine/parseqs.dart';
 
 class IOWebSocketTransport extends Transport {
   static final Logger _logger =
-      Logger('socket_io_client:transport.IOWebSocketTransport');
+      Logger('old_socket_io_client:transport.IOWebSocketTransport');
 
   @override
   String? name = 'websocket';
@@ -31,6 +32,29 @@ class IOWebSocketTransport extends Transport {
     perMessageDeflate = opts['perMessageDeflate'];
     protocols = opts['protocols'];
     extraHeaders = opts['extraHeaders'];
+  }
+
+  /// Adds event listeners to the socket
+  ///
+  /// @api private
+  void addEventListeners() {
+    var isOpen = false;
+    ws?.listen((data) {
+      if (isOpen != true) {
+        onOpen();
+        isOpen = true;
+      }
+      onData(data);
+    }, onDone: () => onClose(), onError: (_) => onError('websocket error'));
+  }
+
+  ///
+  /// Closes socket.
+  ///
+  /// @api private
+  @override
+  void doClose() {
+    ws?.close();
   }
 
   @override
@@ -54,18 +78,47 @@ class IOWebSocketTransport extends Transport {
     addEventListeners();
   }
 
-  /// Adds event listeners to the socket
+  ///
+  /// Generates uri for connection.
   ///
   /// @api private
-  void addEventListeners() {
-    var isOpen = false;
-    ws?.listen((data) {
-      if (isOpen != true) {
-        onOpen();
-        isOpen = true;
-      }
-      onData(data);
-    }, onDone: () => onClose(), onError: (_) => onError('websocket error'));
+  String uri() {
+    var query = this.query ?? {};
+    var schema = secure == true ? 'wss' : 'ws';
+    var port = '';
+
+    // avoid port if default for schema
+    if (this.port != null &&
+        (('wss' == schema && this.port != 443) ||
+            ('ws' == schema && this.port != 80))) {
+      port = ':${this.port}';
+    }
+
+    // append timestamp to URI
+    if (timestampRequests == true) {
+      query[timestampParam] =
+          DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+    }
+
+    // communicate binary support capabilities
+    if (supportsBinary == false) {
+      query['b64'] = 1;
+    }
+
+    var queryString = encode(query);
+
+    // prepend ? to query
+    if (queryString.isNotEmpty) {
+      queryString = '?$queryString';
+    }
+
+    var ipv6 = hostname.contains(':');
+    return schema +
+        '://' +
+        (ipv6 ? '[' + hostname + ']' : hostname) +
+        port +
+        path +
+        queryString;
   }
 
   /// Writes data to socket.
@@ -110,58 +163,6 @@ class IOWebSocketTransport extends Transport {
         if (--total == 0) done();
       });
     });
-  }
-
-  ///
-  /// Closes socket.
-  ///
-  /// @api private
-  @override
-  void doClose() {
-    ws?.close();
-  }
-
-  ///
-  /// Generates uri for connection.
-  ///
-  /// @api private
-  String uri() {
-    var query = this.query ?? {};
-    var schema = secure == true ? 'wss' : 'ws';
-    var port = '';
-
-    // avoid port if default for schema
-    if (this.port != null &&
-        (('wss' == schema && this.port != 443) ||
-            ('ws' == schema && this.port != 80))) {
-      port = ':${this.port}';
-    }
-
-    // append timestamp to URI
-    if (timestampRequests == true) {
-      query[timestampParam] =
-          DateTime.now().millisecondsSinceEpoch.toRadixString(36);
-    }
-
-    // communicate binary support capabilities
-    if (supportsBinary == false) {
-      query['b64'] = 1;
-    }
-
-    var queryString = encode(query);
-
-    // prepend ? to query
-    if (queryString.isNotEmpty) {
-      queryString = '?$queryString';
-    }
-
-    var ipv6 = hostname.contains(':');
-    return schema +
-        '://' +
-        (ipv6 ? '[' + hostname + ']' : hostname) +
-        port +
-        path +
-        queryString;
   }
 //
 /////

@@ -4,14 +4,15 @@
 
 import 'dart:async';
 import 'dart:html';
+
 import 'package:logging/logging.dart';
-import 'package:socket_io_client/src/engine/transport/transport.dart';
+import 'package:old_socket_io_client/src/engine/parseqs.dart';
+import 'package:old_socket_io_client/src/engine/transport/transport.dart';
 import 'package:socket_io_common/src/engine/parser/parser.dart';
-import 'package:socket_io_client/src/engine/parseqs.dart';
 
 class WebSocketTransport extends Transport {
   static final Logger _logger =
-      Logger('socket_io_client:transport.WebSocketTransport');
+      Logger('old_socket_io_client:transport.WebSocketTransport');
 
   @override
   String? name = 'websocket';
@@ -27,6 +28,27 @@ class WebSocketTransport extends Transport {
     supportsBinary = !forceBase64;
     perMessageDeflate = opts['perMessageDeflate'];
     protocols = opts['protocols'];
+  }
+
+  /// Adds event listeners to the socket
+  ///
+  /// @api private
+  void addEventListeners() {
+    ws!
+      ..onOpen.listen((_) => onOpen())
+      ..onClose.listen((_) => onClose())
+      ..onMessage.listen((MessageEvent evt) => onData(evt.data))
+      ..onError.listen((e) {
+        onError('websocket error');
+      });
+  }
+
+  /// Closes socket.
+  ///
+  /// @api private
+  @override
+  void doClose() {
+    ws?.close();
   }
 
   @override
@@ -47,67 +69,6 @@ class WebSocketTransport extends Transport {
     ws!.binaryType = 'arraybuffer';
 
     addEventListeners();
-  }
-
-  /// Adds event listeners to the socket
-  ///
-  /// @api private
-  void addEventListeners() {
-    ws!
-      ..onOpen.listen((_) => onOpen())
-      ..onClose.listen((_) => onClose())
-      ..onMessage.listen((MessageEvent evt) => onData(evt.data))
-      ..onError.listen((e) {
-        onError('websocket error');
-      });
-  }
-
-  /// Writes data to socket.
-  ///
-  /// @param {Array} array of packets.
-  /// @api private
-  @override
-  void write(List packets) {
-    writable = false;
-
-    var done = () {
-      emit('flush');
-
-      // fake drain
-      // defer to next tick to allow Socket to clear writeBuffer
-      Timer.run(() {
-        writable = true;
-        emit('drain');
-      });
-    };
-
-    var total = packets.length;
-    // encodePacket efficient as it uses WS framing
-    // no need for encodePayload
-    packets.forEach((packet) {
-      PacketParser.encodePacket(packet,
-          supportsBinary: supportsBinary, fromClient: true, callback: (data) {
-        // Sometimes the websocket has already been closed but the browser didn't
-        // have a chance of informing us about it yet, in that case send will
-        // throw an error
-        try {
-          // TypeError is thrown when passing the second argument on Safari
-          ws!.send(data);
-        } catch (e) {
-          _logger.fine('websocket closed before onclose event');
-        }
-
-        if (--total == 0) done();
-      });
-    });
-  }
-
-  /// Closes socket.
-  ///
-  /// @api private
-  @override
-  void doClose() {
-    ws?.close();
   }
 
   /// Generates uri for connection.
@@ -150,6 +111,46 @@ class WebSocketTransport extends Transport {
         port +
         path +
         queryString;
+  }
+
+  /// Writes data to socket.
+  ///
+  /// @param {Array} array of packets.
+  /// @api private
+  @override
+  void write(List packets) {
+    writable = false;
+
+    var done = () {
+      emit('flush');
+
+      // fake drain
+      // defer to next tick to allow Socket to clear writeBuffer
+      Timer.run(() {
+        writable = true;
+        emit('drain');
+      });
+    };
+
+    var total = packets.length;
+    // encodePacket efficient as it uses WS framing
+    // no need for encodePayload
+    packets.forEach((packet) {
+      PacketParser.encodePacket(packet,
+          supportsBinary: supportsBinary, fromClient: true, callback: (data) {
+        // Sometimes the websocket has already been closed but the browser didn't
+        // have a chance of informing us about it yet, in that case send will
+        // throw an error
+        try {
+          // TypeError is thrown when passing the second argument on Safari
+          ws!.send(data);
+        } catch (e) {
+          _logger.fine('websocket closed before onclose event');
+        }
+
+        if (--total == 0) done();
+      });
+    });
   }
 /////
 ///// Feature detection for WebSocket.

@@ -6,12 +6,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:logging/logging.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
-import 'package:socket_io_client/src/engine/parseqs.dart';
+import 'package:old_socket_io_client/src/engine/parseqs.dart';
+import 'package:old_socket_io_client/src/engine/transport/polling_transport.dart';
 import 'package:socket_io_common/src/engine/parser/parser.dart' as parser;
-import 'package:socket_io_client/src/engine/transport/polling_transport.dart';
-import './transport/transport.dart';
+import 'package:socket_io_common/src/util/event_emitter.dart';
 
+import './transport/transport.dart';
 // ignore: uri_does_not_exist
 import './transport/transports_stub.dart'
 // ignore: uri_does_not_exist
@@ -19,7 +19,7 @@ import './transport/transports_stub.dart'
 // ignore: uri_does_not_exist
     if (dart.library.io) './transport/io_transports.dart';
 
-final Logger _logger = Logger('socket_io_client:engine.Socket');
+final Logger _logger = Logger('old_socket_io_client:engine.Socket');
 
 ///
 /// Socket constructor.
@@ -29,6 +29,13 @@ final Logger _logger = Logger('socket_io_client:engine.Socket');
 /// @api public
 ///
 class Socket extends EventEmitter {
+  static bool priorWebsocketSuccess = false;
+
+  ///
+  /// Protocol version.
+  ///
+  /// @api public
+  static int protocol = parser.protocol; // this is an int
   late Map opts;
   late Uri uri;
   late bool secure;
@@ -63,7 +70,9 @@ class Socket extends EventEmitter {
   int? requestTimeout;
   Transport? transport;
   bool? supportsBinary;
+
   bool? upgrading;
+
   Map? extraHeaders;
 
   Socket(String uri, Map? opts) {
@@ -165,19 +174,59 @@ class Socket extends EventEmitter {
     open();
   }
 
-  static bool priorWebsocketSuccess = false;
-
-  ///
-  /// Protocol version.
-  ///
-  /// @api public
-  static int protocol = parser.protocol; // this is an int
-
 //
 //  Socket.Socket = Socket;
 //  Socket.Transport = require('./transport');
 //  Socket.transports = require('./transports/index');
 //  Socket.parser = require('engine.io-parser');
+
+  ///
+  /// Closes the connection.
+  ///
+  /// @api private
+  Socket close() {
+    var close = () {
+      onClose('forced close');
+      _logger.fine('socket closing - telling transport to close');
+      transport!.close();
+    };
+
+    var temp;
+    var cleanupAndClose = (_) {
+      off('upgrade', temp);
+      off('upgradeError', temp);
+      close();
+    };
+
+    // a workaround for dart to access the local variable;
+    temp = cleanupAndClose;
+
+    var waitForUpgrade = () {
+      // wait for upgrade to finish since we can't send packets while pausing a transport
+      once('upgrade', cleanupAndClose);
+      once('upgradeError', cleanupAndClose);
+    };
+
+    if ('opening' == readyState || 'open' == readyState) {
+      readyState = 'closing';
+
+      if (writeBuffer.isNotEmpty) {
+        once('drain', (_) {
+          if (upgrading == true) {
+            waitForUpgrade();
+          } else {
+            close();
+          }
+        });
+      } else if (upgrading == true) {
+        waitForUpgrade();
+      } else {
+        close();
+      }
+    }
+
+    return this;
+  }
 
   ///
   /// Creates transport of the given type.
@@ -235,6 +284,201 @@ class Socket extends EventEmitter {
   }
 
   ///
+  /// Filters upgrades, returning only those matching client transports.
+  ///
+  /// @param {Array} server upgrades
+  /// @api private
+  ///
+  List filterUpgrades(List upgrades) =>
+      transports.where((_) => upgrades.contains(_)).toList();
+
+  ///
+  /// Flush write buffers.
+  ///
+  /// @api private
+  void flush() {
+    if ('closed' != readyState &&
+        transport!.writable == true &&
+        upgrading != true &&
+        writeBuffer.isNotEmpty) {
+      _logger.fine('flushing ${writeBuffer.length} packets in socket');
+      transport!.send(writeBuffer);
+      // keep track of current length of writeBuffer
+      // splice writeBuffer and callbackBuffer on `drain`
+      prevBufferLen = writeBuffer.length;
+      emit('flush');
+    }
+  }
+
+  ///
+  /// Called upon transport close.
+  ///
+  /// @api private
+  void onClose(reason, [desc]) {
+    if ('opening' == readyState ||
+        'open' == readyState ||
+        'closing' == readyState) {
+      _logger.fine('socket close with reason: "$reason"');
+
+      // clear timers
+      pingIntervalTimer?.cancel();
+      pingTimeoutTimer?.cancel();
+
+      // stop event from firing again for transport
+      transport!.off('close');
+
+      // ensure transport won't stay open
+      transport!.close();
+
+      // ignore further transport communication
+      transport!.clearListeners();
+
+      // set ready state
+      readyState = 'closed';
+
+      // clear session id
+      id = null;
+
+      // emit close event
+      emit('close', {'reason': reason, 'desc': desc});
+
+      // clean buffers after, so users can still
+      // grab the buffers on `close` event
+      writeBuffer = [];
+      prevBufferLen = 0;
+    }
+  }
+
+  ///
+  /// Called on `drain` event
+  ///
+  /// @api private
+  void onDrain() {
+    writeBuffer.removeRange(0, prevBufferLen);
+
+    // setting prevBufferLen = 0 is very important
+    // for example, when upgrading, upgrade packet is sent over,
+    // and a nonzero prevBufferLen could cause problems on `drain`
+    prevBufferLen = 0;
+
+    if (writeBuffer.isEmpty) {
+      emit('drain');
+    } else {
+      flush();
+    }
+  }
+
+  ///
+  /// Called upon transport error
+  ///
+  /// @api private
+  void onError(err) {
+    _logger.fine('socket error $err');
+    priorWebsocketSuccess = false;
+    emit('error', err);
+    onClose('transport error', err);
+  }
+
+  ///
+  /// Called upon handshake completion.
+  ///
+  /// @param {Object} handshake obj
+  /// @api private
+  void onHandshake(Map data) {
+    emit('handshake', data);
+    id = data['sid'];
+    transport!.query!['sid'] = data['sid'];
+    upgrades = filterUpgrades(data['upgrades']);
+    pingInterval = data['pingInterval'];
+    pingTimeout = data['pingTimeout'];
+    onOpen();
+    // In case open handler closes socket
+    if ('closed' == readyState) return;
+    setPing();
+
+    // Prolong liveness of socket on heartbeat
+    off('heartbeat', onHeartbeat);
+    on('heartbeat', onHeartbeat);
+  }
+
+  ///
+  /// Resets ping timeout.
+  ///
+  /// @api private
+  void onHeartbeat(timeout) {
+    pingTimeoutTimer?.cancel();
+    pingTimeoutTimer = Timer(
+        Duration(milliseconds: timeout ?? (pingInterval + pingTimeout)), () {
+      if ('closed' == readyState) return;
+      onClose('ping timeout');
+    });
+  }
+
+  ///
+  /// Called when connection is deemed open.
+  ///
+  /// @api public
+  void onOpen() {
+    _logger.fine('socket open');
+    readyState = 'open';
+    priorWebsocketSuccess = 'websocket' == transport!.name;
+    emit('open');
+    flush();
+
+    // we check for `readyState` in case an `open`
+    // listener already closed the socket
+    if ('open' == readyState &&
+        upgrade == true &&
+        transport is PollingTransport) {
+      _logger.fine('starting upgrade probes');
+      for (var i = 0, l = upgrades.length; i < l; i++) {
+        probe(upgrades[i]);
+      }
+    }
+  }
+
+  ///
+  /// Handles a packet.
+  ///
+  /// @api private
+  void onPacket(Map packet) {
+    if ('opening' == readyState ||
+        'open' == readyState ||
+        'closing' == readyState) {
+      var type = packet['type'];
+      var data = packet['data'];
+      _logger.fine('socket receive: type "$type", data "$data"');
+
+      emit('packet', packet);
+
+      // Socket is live - any packet counts
+      emit('heartbeat');
+
+      switch (type) {
+        case 'open':
+          onHandshake(json.decode(data ?? 'null'));
+          break;
+
+        case 'pong':
+          setPing();
+          emit('pong');
+          break;
+
+        case 'error':
+          onError({'error': 'server error', 'code': data});
+          break;
+
+        case 'message':
+          emit('data', data);
+          emit('message', data);
+          break;
+      }
+    } else {
+      _logger.fine('packet received with socket readyState "$readyState"');
+    }
+  }
+
+  ///
   /// Initializes transport to use and starts probe.
   ///
   /// @api private
@@ -267,26 +511,11 @@ class Socket extends EventEmitter {
   }
 
   ///
-  /// Sets the current transport. Disables the existing one (if any).
+  /// Sends a ping packet.
   ///
   /// @api private
-  void setTransport(transport) {
-    _logger.fine('setting transport ${transport?.name}');
-
-    if (this.transport != null) {
-      _logger.fine('clearing existing transport ${this.transport!.name}');
-      this.transport!.clearListeners();
-    }
-
-    // set up transport
-    this.transport = transport;
-
-    // set up transport listeners
-    transport
-      ..on('drain', (_) => onDrain())
-      ..on('packet', (packet) => onPacket(packet))
-      ..on('error', (e) => onError(e))
-      ..on('close', (_) => onClose('transport close'));
+  void ping() {
+    sendPacket(type: 'ping', callback: (_) => emit('ping'));
   }
 
   ///
@@ -404,175 +633,6 @@ class Socket extends EventEmitter {
     transport!.open();
   }
 
-  ///
-  /// Called when connection is deemed open.
-  ///
-  /// @api public
-  void onOpen() {
-    _logger.fine('socket open');
-    readyState = 'open';
-    priorWebsocketSuccess = 'websocket' == transport!.name;
-    emit('open');
-    flush();
-
-    // we check for `readyState` in case an `open`
-    // listener already closed the socket
-    if ('open' == readyState &&
-        upgrade == true &&
-        transport is PollingTransport) {
-      _logger.fine('starting upgrade probes');
-      for (var i = 0, l = upgrades.length; i < l; i++) {
-        probe(upgrades[i]);
-      }
-    }
-  }
-
-  ///
-  /// Handles a packet.
-  ///
-  /// @api private
-  void onPacket(Map packet) {
-    if ('opening' == readyState ||
-        'open' == readyState ||
-        'closing' == readyState) {
-      var type = packet['type'];
-      var data = packet['data'];
-      _logger.fine('socket receive: type "$type", data "$data"');
-
-      emit('packet', packet);
-
-      // Socket is live - any packet counts
-      emit('heartbeat');
-
-      switch (type) {
-        case 'open':
-          onHandshake(json.decode(data ?? 'null'));
-          break;
-
-        case 'pong':
-          setPing();
-          emit('pong');
-          break;
-
-        case 'error':
-          onError({'error': 'server error', 'code': data});
-          break;
-
-        case 'message':
-          emit('data', data);
-          emit('message', data);
-          break;
-      }
-    } else {
-      _logger.fine('packet received with socket readyState "$readyState"');
-    }
-  }
-
-  ///
-  /// Called upon handshake completion.
-  ///
-  /// @param {Object} handshake obj
-  /// @api private
-  void onHandshake(Map data) {
-    emit('handshake', data);
-    id = data['sid'];
-    transport!.query!['sid'] = data['sid'];
-    upgrades = filterUpgrades(data['upgrades']);
-    pingInterval = data['pingInterval'];
-    pingTimeout = data['pingTimeout'];
-    onOpen();
-    // In case open handler closes socket
-    if ('closed' == readyState) return;
-    setPing();
-
-    // Prolong liveness of socket on heartbeat
-    off('heartbeat', onHeartbeat);
-    on('heartbeat', onHeartbeat);
-  }
-
-  ///
-  /// Resets ping timeout.
-  ///
-  /// @api private
-  void onHeartbeat(timeout) {
-    pingTimeoutTimer?.cancel();
-    pingTimeoutTimer = Timer(
-        Duration(milliseconds: timeout ?? (pingInterval + pingTimeout)), () {
-      if ('closed' == readyState) return;
-      onClose('ping timeout');
-    });
-  }
-
-  ///
-  /// Pings server every `this.pingInterval` and expects response
-  /// within `this.pingTimeout` or closes connection.
-  ///
-  /// @api private
-  void setPing() {
-    pingIntervalTimer?.cancel();
-    pingIntervalTimer = Timer(Duration(milliseconds: pingInterval), () {
-      _logger
-          .fine('writing ping packet - expecting pong within ${pingTimeout}ms');
-      ping();
-      onHeartbeat(pingTimeout);
-    });
-  }
-
-  ///
-  /// Sends a ping packet.
-  ///
-  /// @api private
-  void ping() {
-    sendPacket(type: 'ping', callback: (_) => emit('ping'));
-  }
-
-  ///
-  /// Called on `drain` event
-  ///
-  /// @api private
-  void onDrain() {
-    writeBuffer.removeRange(0, prevBufferLen);
-
-    // setting prevBufferLen = 0 is very important
-    // for example, when upgrading, upgrade packet is sent over,
-    // and a nonzero prevBufferLen could cause problems on `drain`
-    prevBufferLen = 0;
-
-    if (writeBuffer.isEmpty) {
-      emit('drain');
-    } else {
-      flush();
-    }
-  }
-
-  ///
-  /// Flush write buffers.
-  ///
-  /// @api private
-  void flush() {
-    if ('closed' != readyState &&
-        transport!.writable == true &&
-        upgrading != true &&
-        writeBuffer.isNotEmpty) {
-      _logger.fine('flushing ${writeBuffer.length} packets in socket');
-      transport!.send(writeBuffer);
-      // keep track of current length of writeBuffer
-      // splice writeBuffer and callbackBuffer on `drain`
-      prevBufferLen = writeBuffer.length;
-      emit('flush');
-    }
-  }
-
-  ///
-  /// Sends a message.
-  ///
-  /// @param {String} message.
-  /// @param {Function} callback function.
-  /// @param {Object} options.
-  /// @return {Socket} for chaining.
-  /// @api public
-  Socket write(msg, options, [EventHandler? fn]) => send(msg, options, fn);
-
   Socket send(msg, options, [EventHandler? fn]) {
     sendPacket(type: 'message', data: msg, options: options, callback: fn);
     return this;
@@ -602,109 +662,50 @@ class Socket extends EventEmitter {
   }
 
   ///
-  /// Closes the connection.
+  /// Pings server every `this.pingInterval` and expects response
+  /// within `this.pingTimeout` or closes connection.
   ///
   /// @api private
-  Socket close() {
-    var close = () {
-      onClose('forced close');
-      _logger.fine('socket closing - telling transport to close');
-      transport!.close();
-    };
+  void setPing() {
+    pingIntervalTimer?.cancel();
+    pingIntervalTimer = Timer(Duration(milliseconds: pingInterval), () {
+      _logger
+          .fine('writing ping packet - expecting pong within ${pingTimeout}ms');
+      ping();
+      onHeartbeat(pingTimeout);
+    });
+  }
 
-    var temp;
-    var cleanupAndClose = (_) {
-      off('upgrade', temp);
-      off('upgradeError', temp);
-      close();
-    };
+  ///
+  /// Sets the current transport. Disables the existing one (if any).
+  ///
+  /// @api private
+  void setTransport(transport) {
+    _logger.fine('setting transport ${transport?.name}');
 
-    // a workaround for dart to access the local variable;
-    temp = cleanupAndClose;
-
-    var waitForUpgrade = () {
-      // wait for upgrade to finish since we can't send packets while pausing a transport
-      once('upgrade', cleanupAndClose);
-      once('upgradeError', cleanupAndClose);
-    };
-
-    if ('opening' == readyState || 'open' == readyState) {
-      readyState = 'closing';
-
-      if (writeBuffer.isNotEmpty) {
-        once('drain', (_) {
-          if (upgrading == true) {
-            waitForUpgrade();
-          } else {
-            close();
-          }
-        });
-      } else if (upgrading == true) {
-        waitForUpgrade();
-      } else {
-        close();
-      }
+    if (this.transport != null) {
+      _logger.fine('clearing existing transport ${this.transport!.name}');
+      this.transport!.clearListeners();
     }
 
-    return this;
+    // set up transport
+    this.transport = transport;
+
+    // set up transport listeners
+    transport
+      ..on('drain', (_) => onDrain())
+      ..on('packet', (packet) => onPacket(packet))
+      ..on('error', (e) => onError(e))
+      ..on('close', (_) => onClose('transport close'));
   }
 
   ///
-  /// Called upon transport error
+  /// Sends a message.
   ///
-  /// @api private
-  void onError(err) {
-    _logger.fine('socket error $err');
-    priorWebsocketSuccess = false;
-    emit('error', err);
-    onClose('transport error', err);
-  }
-
-  ///
-  /// Called upon transport close.
-  ///
-  /// @api private
-  void onClose(reason, [desc]) {
-    if ('opening' == readyState ||
-        'open' == readyState ||
-        'closing' == readyState) {
-      _logger.fine('socket close with reason: "$reason"');
-
-      // clear timers
-      pingIntervalTimer?.cancel();
-      pingTimeoutTimer?.cancel();
-
-      // stop event from firing again for transport
-      transport!.off('close');
-
-      // ensure transport won't stay open
-      transport!.close();
-
-      // ignore further transport communication
-      transport!.clearListeners();
-
-      // set ready state
-      readyState = 'closed';
-
-      // clear session id
-      id = null;
-
-      // emit close event
-      emit('close', {'reason': reason, 'desc': desc});
-
-      // clean buffers after, so users can still
-      // grab the buffers on `close` event
-      writeBuffer = [];
-      prevBufferLen = 0;
-    }
-  }
-
-  ///
-  /// Filters upgrades, returning only those matching client transports.
-  ///
-  /// @param {Array} server upgrades
-  /// @api private
-  ///
-  List filterUpgrades(List upgrades) =>
-      transports.where((_) => upgrades.contains(_)).toList();
+  /// @param {String} message.
+  /// @param {Function} callback function.
+  /// @param {Object} options.
+  /// @return {Socket} for chaining.
+  /// @api public
+  Socket write(msg, options, [EventHandler? fn]) => send(msg, options, fn);
 }

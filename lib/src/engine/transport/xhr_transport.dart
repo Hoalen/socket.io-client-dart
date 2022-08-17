@@ -3,112 +3,13 @@
 // Author: jumperchen<jumperchen@potix.com>
 import 'dart:async';
 import 'dart:html';
-
 import 'dart:typed_data';
+
 import 'package:logging/logging.dart';
+import 'package:old_socket_io_client/src/engine/transport/polling_transport.dart';
 import 'package:socket_io_common/src/util/event_emitter.dart';
-import 'package:socket_io_client/src/engine/transport/polling_transport.dart';
 
-final Logger _logger = Logger('socket_io_client:transport.XHRTransport');
-
-class XHRTransport extends PollingTransport {
-  // int? requestTimeout;
-  late bool xd;
-  late bool xs;
-  Request? sendXhr;
-  Request? pollXhr;
-  late Map<String, dynamic> extraHeaders;
-
-  ///
-  /// XHR Polling constructor.
-  ///
-  /// @param {Object} opts
-  /// @api public
-  XHRTransport(Map opts) : super(opts) {
-    // requestTimeout = opts['requestTimeout'];
-    extraHeaders = opts['extraHeaders'] ?? <String, dynamic>{};
-
-    var isSSL = 'https:' == window.location.protocol;
-    var port = window.location.port;
-
-    // some user agents have empty `location.port`
-    if (port.isEmpty) {
-      port = isSSL ? '443' : '80';
-    }
-
-    xd = opts['hostname'] != window.location.hostname ||
-        int.parse(port) != opts['port'];
-    xs = opts['secure'] != isSSL;
-  }
-
-  ///
-  /// XHR supports binary
-  @override
-  bool? supportsBinary = true;
-
-  ///
-  /// Creates a request.
-  ///
-  /// @api private
-  Request request([Map? opts]) {
-    opts = opts ?? {};
-    opts['uri'] = uri();
-    opts['xd'] = xd;
-    opts['xs'] = xs;
-    opts['agent'] = agent ?? false;
-    opts['supportsBinary'] = supportsBinary;
-    opts['enablesXDR'] = enablesXDR;
-
-    // SSL options for Node.js client
-//    opts.pfx = this.pfx;
-//    opts.key = this.key;
-//    opts.passphrase = this.passphrase;
-//    opts.cert = this.cert;
-//    opts.ca = this.ca;
-//    opts.ciphers = this.ciphers;
-//    opts.rejectUnauthorized = this.rejectUnauthorized;
-//    opts.requestTimeout = this.requestTimeout;
-
-    // other options for Node.js client
-    opts['extraHeaders'] = extraHeaders;
-
-    return Request(opts);
-  }
-
-  ///
-  /// Sends data.
-  ///
-  /// @param {String} data to send.
-  /// @param {Function} called upon flush.
-  /// @api private
-  @override
-  void doWrite(data, fn) {
-    var isBinary = data is! String;
-    var req = request({'method': 'POST', 'data': data, 'isBinary': isBinary});
-    req.on('success', fn);
-    req.on('error', (err) {
-      onError('xhr post error', err);
-    });
-    sendXhr = req;
-  }
-
-  ///
-  /// Starts a poll cycle.
-  ///
-  /// @api private
-  @override
-  void doPoll() {
-    _logger.fine('xhr poll');
-    var req = request();
-    req.on('data', (data) {
-      onData(data);
-    });
-    req.on('error', (err) {
-      onError('xhr poll error', err);
-    });
-    pollXhr = req;
-  }
-}
+final Logger _logger = Logger('old_socket_io_client:transport.XHRTransport');
 
 ///
 /// Request constructor
@@ -147,6 +48,38 @@ class Request extends EventEmitter {
     extraHeaders = opts['extraHeaders'];
 
     create();
+  }
+
+  ///
+  /// Aborts the request.
+  ///
+  /// @api public
+  void abort() => cleanup();
+
+  ///
+  /// Cleans up house.
+  ///
+  /// @api private
+  void cleanup([fromError]) {
+    if (xhr == null) {
+      return;
+    }
+    // xmlhttprequest
+    if (hasXDR()) {
+    } else {
+      readyStateChange?.cancel();
+      readyStateChange = null;
+    }
+
+    if (fromError != null) {
+      try {
+        xhr!.abort();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    xhr = null;
   }
 
   ///
@@ -245,12 +178,13 @@ class Request extends EventEmitter {
   }
 
   ///
-  /// Called upon successful response.
+  /// Check if it has XDomainRequest.
   ///
   /// @api private
-  void onSuccess() {
-    emit('success');
-    cleanup();
+  bool hasXDR() {
+    // Todo: handle it in dart way
+    return false;
+    //  return 'undefined' !== typeof global.XDomainRequest && !this.xs && this.enablesXDR;
   }
 
   ///
@@ -269,32 +203,6 @@ class Request extends EventEmitter {
   void onError(err) {
     emit('error', err);
     cleanup(true);
-  }
-
-  ///
-  /// Cleans up house.
-  ///
-  /// @api private
-  void cleanup([fromError]) {
-    if (xhr == null) {
-      return;
-    }
-    // xmlhttprequest
-    if (hasXDR()) {
-    } else {
-      readyStateChange?.cancel();
-      readyStateChange = null;
-    }
-
-    if (fromError != null) {
-      try {
-        xhr!.abort();
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    xhr = null;
   }
 
   ///
@@ -325,18 +233,110 @@ class Request extends EventEmitter {
   }
 
   ///
-  /// Check if it has XDomainRequest.
+  /// Called upon successful response.
   ///
   /// @api private
-  bool hasXDR() {
-    // Todo: handle it in dart way
-    return false;
-    //  return 'undefined' !== typeof global.XDomainRequest && !this.xs && this.enablesXDR;
+  void onSuccess() {
+    emit('success');
+    cleanup();
+  }
+}
+
+class XHRTransport extends PollingTransport {
+  // int? requestTimeout;
+  late bool xd;
+  late bool xs;
+  Request? sendXhr;
+  Request? pollXhr;
+  late Map<String, dynamic> extraHeaders;
+
+  ///
+  /// XHR supports binary
+  @override
+  bool? supportsBinary = true;
+
+  ///
+  /// XHR Polling constructor.
+  ///
+  /// @param {Object} opts
+  /// @api public
+  XHRTransport(Map opts) : super(opts) {
+    // requestTimeout = opts['requestTimeout'];
+    extraHeaders = opts['extraHeaders'] ?? <String, dynamic>{};
+
+    var isSSL = 'https:' == window.location.protocol;
+    var port = window.location.port;
+
+    // some user agents have empty `location.port`
+    if (port.isEmpty) {
+      port = isSSL ? '443' : '80';
+    }
+
+    xd = opts['hostname'] != window.location.hostname ||
+        int.parse(port) != opts['port'];
+    xs = opts['secure'] != isSSL;
   }
 
   ///
-  /// Aborts the request.
+  /// Starts a poll cycle.
   ///
-  /// @api public
-  void abort() => cleanup();
+  /// @api private
+  @override
+  void doPoll() {
+    _logger.fine('xhr poll');
+    var req = request();
+    req.on('data', (data) {
+      onData(data);
+    });
+    req.on('error', (err) {
+      onError('xhr poll error', err);
+    });
+    pollXhr = req;
+  }
+
+  ///
+  /// Sends data.
+  ///
+  /// @param {String} data to send.
+  /// @param {Function} called upon flush.
+  /// @api private
+  @override
+  void doWrite(data, fn) {
+    var isBinary = data is! String;
+    var req = request({'method': 'POST', 'data': data, 'isBinary': isBinary});
+    req.on('success', fn);
+    req.on('error', (err) {
+      onError('xhr post error', err);
+    });
+    sendXhr = req;
+  }
+
+  ///
+  /// Creates a request.
+  ///
+  /// @api private
+  Request request([Map? opts]) {
+    opts = opts ?? {};
+    opts['uri'] = uri();
+    opts['xd'] = xd;
+    opts['xs'] = xs;
+    opts['agent'] = agent ?? false;
+    opts['supportsBinary'] = supportsBinary;
+    opts['enablesXDR'] = enablesXDR;
+
+    // SSL options for Node.js client
+//    opts.pfx = this.pfx;
+//    opts.key = this.key;
+//    opts.passphrase = this.passphrase;
+//    opts.cert = this.cert;
+//    opts.ca = this.ca;
+//    opts.ciphers = this.ciphers;
+//    opts.rejectUnauthorized = this.rejectUnauthorized;
+//    opts.requestTimeout = this.requestTimeout;
+
+    // other options for Node.js client
+    opts['extraHeaders'] = extraHeaders;
+
+    return Request(opts);
+  }
 }

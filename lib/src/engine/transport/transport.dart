@@ -2,12 +2,13 @@
 /// History: 2019-01-21 12:27
 /// Author: jumperchen<jumperchen@potix.com>
 import 'package:logging/logging.dart';
+import 'package:old_socket_io_client/src/engine/socket.dart';
 import 'package:socket_io_common/src/engine/parser/parser.dart';
 import 'package:socket_io_common/src/util/event_emitter.dart';
-import 'package:socket_io_client/src/engine/socket.dart';
 
 abstract class Transport extends EventEmitter {
-  static final Logger _logger = Logger('socket_io_client:transport.Transport');
+  static final Logger _logger =
+      Logger('old_socket_io_client:transport.Transport');
 
   late String path;
   late String hostname;
@@ -53,6 +54,41 @@ abstract class Transport extends EventEmitter {
   }
 
   ///
+  /// Closes the transport.
+  ///
+  /// @api private
+  void close() {
+    if ('opening' == readyState || 'open' == readyState) {
+      doClose();
+      onClose();
+    }
+  }
+
+  void doClose();
+
+  void doOpen();
+
+  ///
+  /// Called upon close.
+  ///
+  /// @api private
+  void onClose() {
+    readyState = 'closed';
+    emit('close');
+  }
+
+  ///
+  /// Called with data.
+  ///
+  /// @param {String} data
+  /// @api private
+  void onData(data) {
+    var packet = PacketParser.decodePacket(data,
+        binaryType: socket?.binaryType, utf8decode: false);
+    onPacket(packet);
+  }
+
+  ///
   /// Emits an error.
   ///
   /// @param {String} str
@@ -67,6 +103,22 @@ abstract class Transport extends EventEmitter {
   }
 
   ///
+  /// Called upon open
+  ///
+  /// @api private
+  void onOpen() {
+    readyState = 'open';
+    writable = true;
+    emit('open');
+  }
+
+  ///
+  /// Called with a decoded packet.
+  void onPacket(packet) {
+    emit('packet', packet);
+  }
+
+  ///
   /// Opens the transport.
   ///
   /// @api public
@@ -74,17 +126,6 @@ abstract class Transport extends EventEmitter {
     if ('closed' == readyState || '' == readyState) {
       readyState = 'opening';
       doOpen();
-    }
-  }
-
-  ///
-  /// Closes the transport.
-  ///
-  /// @api private
-  void close() {
-    if ('opening' == readyState || 'open' == readyState) {
-      doClose();
-      onClose();
     }
   }
 
@@ -101,43 +142,5 @@ abstract class Transport extends EventEmitter {
     }
   }
 
-  ///
-  /// Called upon open
-  ///
-  /// @api private
-  void onOpen() {
-    readyState = 'open';
-    writable = true;
-    emit('open');
-  }
-
-  ///
-  /// Called with data.
-  ///
-  /// @param {String} data
-  /// @api private
-  void onData(data) {
-    var packet = PacketParser.decodePacket(data,
-        binaryType: socket?.binaryType, utf8decode: false);
-    onPacket(packet);
-  }
-
-  ///
-  /// Called with a decoded packet.
-  void onPacket(packet) {
-    emit('packet', packet);
-  }
-
-  ///
-  /// Called upon close.
-  ///
-  /// @api private
-  void onClose() {
-    readyState = 'closed';
-    emit('close');
-  }
-
   void write(List data);
-  void doOpen();
-  void doClose();
 }

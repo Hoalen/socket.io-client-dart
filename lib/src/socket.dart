@@ -12,10 +12,10 @@ import 'dart:typed_data';
 ///
 /// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
 import 'package:logging/logging.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
-import 'package:socket_io_client/src/manager.dart';
-import 'package:socket_io_client/src/on.dart' as util;
+import 'package:old_socket_io_client/src/manager.dart';
+import 'package:old_socket_io_client/src/on.dart' as util;
 import 'package:socket_io_common/src/parser/parser.dart';
+import 'package:socket_io_common/src/util/event_emitter.dart';
 
 ///
 /// Internal events (blacklisted).
@@ -40,7 +40,7 @@ const List EVENTS = [
   'pong'
 ];
 
-final Logger _logger = Logger('socket_io_client:Socket');
+final Logger _logger = Logger('old_socket_io_client:Socket');
 
 ///
 /// `Socket` constructor.
@@ -72,25 +72,48 @@ class Socket extends EventEmitter {
   }
 
   ///
-  /// Subscribe to open, close and packet events
+  /// Produces an ack callback to emit with an event.
   ///
   /// @api private
-  void subEvents() {
-    if (subs?.isNotEmpty == true) return;
+  Function ack(id) {
+    var sent = false;
+    return (dynamic data) {
+      // prevent double callbacks
+      if (sent) return;
+      sent = true;
+      _logger.fine('sending ack $data');
 
-    var io = this.io;
-    subs = [
-      util.on(io, 'open', onopen),
-      util.on(io, 'packet', onpacket),
-      util.on(io, 'close', onclose)
-    ];
+      var sendData = <dynamic>[];
+      if (data is ByteBuffer || data is List<int>) {
+        sendData.add(data);
+      } else if (data is Iterable) {
+        sendData.addAll(data);
+      } else if (data != null) {
+        sendData.add(data);
+      }
+
+      packet({'type': ACK, 'id': id, 'data': sendData});
+    };
   }
 
   ///
-  /// "Opens" the socket.
+  /// Disconnects the socket manually.
   ///
+  /// @return {Socket} self
   /// @api public
-  Socket open() => connect();
+  Socket close() => disconnect();
+
+  ///
+  /// Sets the compress flag.
+  ///
+  /// @param {Boolean} if `true`, compresses the sending data
+  /// @return {Socket} self
+  /// @api public
+  Socket compress(compress) {
+    flags = flags ??= {};
+    flags!['compress'] = compress;
+    return this;
+  }
 
   Socket connect() {
     if (connected == true) return this;
@@ -102,13 +125,48 @@ class Socket extends EventEmitter {
   }
 
   ///
-  /// Sends a `message` event.
+  /// Called upon forced client/server side disconnections,
+  /// this method ensures the manager stops tracking us and
+  /// that reconnections don't get triggered for this.
   ///
-  /// @return {Socket} self
-  /// @api public
-  Socket send(List args) {
-    emit('message', args);
+  /// @api private.
+
+  void destroy() {
+    if (subs?.isNotEmpty == true) {
+      // clean subscriptions to avoid reconnections
+      for (var i = 0; i < subs!.length; i++) {
+        subs![i].destroy();
+      }
+      subs = null;
+    }
+
+    io.destroy(this);
+  }
+
+  Socket disconnect() {
+    if (connected == true) {
+      _logger.fine('performing disconnect ($nsp)');
+      packet({'type': DISCONNECT});
+    }
+
+    // remove socket from pool
+    destroy();
+
+    if (connected == true) {
+      // fire events
+      onclose('io client disconnect');
+    }
     return this;
+  }
+
+  /// Disposes the socket manually which will destroy, close, disconnect the socket connection
+  /// and clear all the event listeners. Unlike [close] or [disconnect] which won't clear
+  /// all the event listeners
+  ///
+  /// @since 0.9.11
+  void dispose() {
+    disconnect();
+    clearListeners();
   }
 
   ///
@@ -123,8 +181,26 @@ class Socket extends EventEmitter {
     emitWithAck(event, data);
   }
 
-  void emitWithBinary(String event, [data]) {
-    emitWithAck(event, data, binary: true);
+  ///
+  /// Emit buffered events (received and emitted).
+  ///
+  /// @api private
+  void emitBuffered() {
+    var i;
+    for (i = 0; i < receiveBuffer.length; i++) {
+      List args = receiveBuffer[i];
+      if (args.length > 2) {
+        Function.apply(super.emit, [args.first, args.sublist(1)]);
+      } else {
+        Function.apply(super.emit, args);
+      }
+    }
+    receiveBuffer = [];
+
+    for (i = 0; i < sendBuffer.length; i++) {
+      packet(sendBuffer[i]);
+    }
+    sendBuffer = [];
   }
 
   ///
@@ -168,14 +244,91 @@ class Socket extends EventEmitter {
     }
   }
 
+  void emitWithBinary(String event, [data]) {
+    emitWithAck(event, data, binary: true);
+  }
+
   ///
-  /// Sends a packet.
+  /// Called upon a server acknowlegement.
   ///
   /// @param {Object} packet
   /// @api private
-  void packet(Map packet) {
-    packet['nsp'] = nsp;
-    io.packet(packet);
+  void onack(Map packet) {
+    var ack = acks.remove(packet['id']);
+    if (ack is Function) {
+      _logger.fine('''calling ack ${packet['id']} with ${packet['data']}''');
+
+      var args = packet['data'] as List;
+      if (args.length > 1) {
+        // Fix for #42 with nodejs server
+        Function.apply(ack, [args]);
+      } else {
+        Function.apply(ack, args);
+      }
+    } else {
+      _logger.fine('''bad ack ${packet['id']}''');
+    }
+  }
+
+  ///
+  /// Called upon engine `close`.
+  ///
+  /// @param {String} reason
+  /// @api private
+  void onclose(reason) {
+    _logger.fine('close ($reason)');
+    emit('disconnecting', reason);
+    connected = false;
+    disconnected = true;
+    id = null;
+    emit('disconnect', reason);
+  }
+
+  ///
+  /// Called upon server connect.
+  ///
+  /// @api private
+  void onconnect() {
+    connected = true;
+    disconnected = false;
+    emit('connect');
+    emitBuffered();
+  }
+
+  ///
+  /// Called upon server disconnect.
+  ///
+  /// @api private
+  void ondisconnect() {
+    _logger.fine('server disconnect ($nsp)');
+    destroy();
+    onclose('io server disconnect');
+  }
+
+  ///
+  /// Called upon a server event.
+  ///
+  /// @param {Object} packet
+  /// @api private
+  void onevent(Map packet) {
+    List args = packet['data'] ?? [];
+//    debug('emitting event %j', args);
+
+    if (null != packet['id']) {
+//      debug('attaching ack callback to event');
+      args.add(ack(packet['id']));
+    }
+
+    // dart doesn't support "String... rest" syntax.
+    if (connected == true) {
+      if (args.length > 2) {
+        Function.apply(super.emit, [args.first, args.sublist(1)]);
+      } else {
+        Function.apply(super.emit, args);
+      }
+    } else {
+      receiveBuffer.add(args);
+    }
   }
 
   ///
@@ -193,20 +346,6 @@ class Socket extends EventEmitter {
         packet({'type': CONNECT});
       }
     }
-  }
-
-  ///
-  /// Called upon engine `close`.
-  ///
-  /// @param {String} reason
-  /// @api private
-  void onclose(reason) {
-    _logger.fine('close ($reason)');
-    emit('disconnecting', reason);
-    connected = false;
-    disconnected = true;
-    id = null;
-    emit('disconnect', reason);
   }
 
   ///
@@ -249,182 +388,43 @@ class Socket extends EventEmitter {
   }
 
   ///
-  /// Called upon a server event.
+  /// "Opens" the socket.
+  ///
+  /// @api public
+  Socket open() => connect();
+
+  ///
+  /// Sends a packet.
   ///
   /// @param {Object} packet
   /// @api private
-  void onevent(Map packet) {
-    List args = packet['data'] ?? [];
-//    debug('emitting event %j', args);
-
-    if (null != packet['id']) {
-//      debug('attaching ack callback to event');
-      args.add(ack(packet['id']));
-    }
-
-    // dart doesn't support "String... rest" syntax.
-    if (connected == true) {
-      if (args.length > 2) {
-        Function.apply(super.emit, [args.first, args.sublist(1)]);
-      } else {
-        Function.apply(super.emit, args);
-      }
-    } else {
-      receiveBuffer.add(args);
-    }
+  void packet(Map packet) {
+    packet['nsp'] = nsp;
+    io.packet(packet);
   }
 
   ///
-  /// Produces an ack callback to emit with an event.
-  ///
-  /// @api private
-  Function ack(id) {
-    var sent = false;
-    return (dynamic data) {
-      // prevent double callbacks
-      if (sent) return;
-      sent = true;
-      _logger.fine('sending ack $data');
-
-      var sendData = <dynamic>[];
-      if (data is ByteBuffer || data is List<int>) {
-        sendData.add(data);
-      } else if (data is Iterable) {
-        sendData.addAll(data);
-      } else if (data != null) {
-        sendData.add(data);
-      }
-
-      packet({'type': ACK, 'id': id, 'data': sendData});
-    };
-  }
-
-  ///
-  /// Called upon a server acknowlegement.
-  ///
-  /// @param {Object} packet
-  /// @api private
-  void onack(Map packet) {
-    var ack = acks.remove(packet['id']);
-    if (ack is Function) {
-      _logger.fine('''calling ack ${packet['id']} with ${packet['data']}''');
-
-      var args = packet['data'] as List;
-      if (args.length > 1) {
-        // Fix for #42 with nodejs server
-        Function.apply(ack, [args]);
-      } else {
-        Function.apply(ack, args);
-      }
-    } else {
-      _logger.fine('''bad ack ${packet['id']}''');
-    }
-  }
-
-  ///
-  /// Called upon server connect.
-  ///
-  /// @api private
-  void onconnect() {
-    connected = true;
-    disconnected = false;
-    emit('connect');
-    emitBuffered();
-  }
-
-  ///
-  /// Emit buffered events (received and emitted).
-  ///
-  /// @api private
-  void emitBuffered() {
-    var i;
-    for (i = 0; i < receiveBuffer.length; i++) {
-      List args = receiveBuffer[i];
-      if (args.length > 2) {
-        Function.apply(super.emit, [args.first, args.sublist(1)]);
-      } else {
-        Function.apply(super.emit, args);
-      }
-    }
-    receiveBuffer = [];
-
-    for (i = 0; i < sendBuffer.length; i++) {
-      packet(sendBuffer[i]);
-    }
-    sendBuffer = [];
-  }
-
-  ///
-  /// Called upon server disconnect.
-  ///
-  /// @api private
-  void ondisconnect() {
-    _logger.fine('server disconnect ($nsp)');
-    destroy();
-    onclose('io server disconnect');
-  }
-
-  ///
-  /// Called upon forced client/server side disconnections,
-  /// this method ensures the manager stops tracking us and
-  /// that reconnections don't get triggered for this.
-  ///
-  /// @api private.
-
-  void destroy() {
-    if (subs?.isNotEmpty == true) {
-      // clean subscriptions to avoid reconnections
-      for (var i = 0; i < subs!.length; i++) {
-        subs![i].destroy();
-      }
-      subs = null;
-    }
-
-    io.destroy(this);
-  }
-
-  ///
-  /// Disconnects the socket manually.
+  /// Sends a `message` event.
   ///
   /// @return {Socket} self
   /// @api public
-  Socket close() => disconnect();
-
-  Socket disconnect() {
-    if (connected == true) {
-      _logger.fine('performing disconnect ($nsp)');
-      packet({'type': DISCONNECT});
-    }
-
-    // remove socket from pool
-    destroy();
-
-    if (connected == true) {
-      // fire events
-      onclose('io client disconnect');
-    }
+  Socket send(List args) {
+    emit('message', args);
     return this;
   }
 
-  /// Disposes the socket manually which will destroy, close, disconnect the socket connection
-  /// and clear all the event listeners. Unlike [close] or [disconnect] which won't clear
-  /// all the event listeners
   ///
-  /// @since 0.9.11
-  void dispose() {
-    disconnect();
-    clearListeners();
-  }
+  /// Subscribe to open, close and packet events
+  ///
+  /// @api private
+  void subEvents() {
+    if (subs?.isNotEmpty == true) return;
 
-  ///
-  /// Sets the compress flag.
-  ///
-  /// @param {Boolean} if `true`, compresses the sending data
-  /// @return {Socket} self
-  /// @api public
-  Socket compress(compress) {
-    flags = flags ??= {};
-    flags!['compress'] = compress;
-    return this;
+    var io = this.io;
+    subs = [
+      util.on(io, 'open', onopen),
+      util.on(io, 'packet', onpacket),
+      util.on(io, 'close', onclose)
+    ];
   }
 }

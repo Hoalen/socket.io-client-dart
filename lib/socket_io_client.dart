@@ -14,20 +14,20 @@
 library socket_io_client;
 
 import 'package:logging/logging.dart';
-import 'package:socket_io_client/src/socket.dart';
+import 'package:old_socket_io_client/src/engine/parseqs.dart';
+import 'package:old_socket_io_client/src/manager.dart';
+import 'package:old_socket_io_client/src/socket.dart';
 import 'package:socket_io_common/src/engine/parser/parser.dart' as parser;
-import 'package:socket_io_client/src/engine/parseqs.dart';
-import 'package:socket_io_client/src/manager.dart';
 
-export 'package:socket_io_client/src/socket.dart';
-export 'package:socket_io_client/src/darty.dart';
+export 'package:old_socket_io_client/src/darty.dart';
+export 'package:old_socket_io_client/src/socket.dart';
+
+final Map<String, dynamic> cache = {};
 
 // Protocol version
 final protocol = parser.protocol;
 
-final Map<String, dynamic> cache = {};
-
-final Logger _logger = Logger('socket_io_client');
+final Logger _logger = Logger('old_socket_io_client');
 
 ///
 /// Looks up an existing `Manager` for multiplexing.

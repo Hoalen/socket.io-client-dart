@@ -1,10 +1,16 @@
 import 'dart:async';
 import 'dart:html';
 import 'dart:js' hide JsArray;
+
 import 'package:js/js_util.dart';
-import 'package:socket_io_client/src/engine/transport/polling_transport.dart';
+import 'package:old_socket_io_client/src/engine/transport/polling_transport.dart';
 
 import 'js_array.dart';
+
+///
+/// Global JSONP callbacks.
+var callbacks;
+final RegExp rEscapedNewline = RegExp(r'\\n');
 
 /// jsonp_transport.dart
 ///
@@ -20,11 +26,6 @@ import 'js_array.dart';
 ///
 /// Cached regular expressions.
 final RegExp rNewline = RegExp(r'\n');
-final RegExp rEscapedNewline = RegExp(r'\\n');
-
-///
-/// Global JSONP callbacks.
-var callbacks;
 
 class JSONPTransport extends PollingTransport {
 //  static var empty = (_) => '';
@@ -34,6 +35,10 @@ class JSONPTransport extends PollingTransport {
   IFrameElement? iframe;
   TextAreaElement? area;
   String? iframeId;
+
+  /// JSONP only supports binary as base64 encoded strings
+  @override
+  bool? supportsBinary = false;
 
   ///
   /// JSONP Polling constructor.
@@ -73,10 +78,6 @@ class JSONPTransport extends PollingTransport {
 //      }, false);
 //    }
   }
-
-  /// JSONP only supports binary as base64 encoded strings
-  @override
-  bool? supportsBinary = false;
 
   ///
   /// Closes the socket.

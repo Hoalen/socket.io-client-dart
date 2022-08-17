@@ -1,5 +1,3 @@
-import 'package:socket_io_client/src/engine/parseqs.dart';
-
 ///
 /// polling_transport.dart
 ///
@@ -12,7 +10,8 @@ import 'package:socket_io_client/src/engine/parseqs.dart';
 ///
 /// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
 import 'package:logging/logging.dart';
-import 'package:socket_io_client/src/engine/transport/transport.dart';
+import 'package:old_socket_io_client/src/engine/parseqs.dart';
+import 'package:old_socket_io_client/src/engine/transport/transport.dart';
 import 'package:socket_io_common/src/engine/parser/parser.dart';
 
 final Logger _logger = Logger('socket_io:transport.PollingTransport');
@@ -40,6 +39,32 @@ abstract class PollingTransport extends Transport {
   }
 
   ///
+  /// For polling, send a close packet.
+  ///
+  /// @api private
+  @override
+  void doClose() {
+    var self = this;
+
+    var close = ([_]) {
+      _logger.fine('writing close packet');
+      self.write([
+        {'type': 'close'}
+      ]);
+    };
+
+    if ('open' == readyState) {
+      _logger.fine('transport open - closing');
+      close();
+    } else {
+      // in case we're trying to close while
+      // handshaking is in progress (GH-164)
+      _logger.fine('transport not open - deferring close');
+      once('open', close);
+    }
+  }
+
+  ///
   /// Opens the socket (triggers polling). We write a PING message to determine
   /// when the transport is open.
   ///
@@ -47,6 +72,53 @@ abstract class PollingTransport extends Transport {
   @override
   void doOpen() {
     poll();
+  }
+
+  void doPoll();
+
+  void doWrite(data, callback);
+
+  ///
+  /// Overloads onData to detect payloads.
+  ///
+  /// @api private
+  @override
+  void onData(data) {
+    var self = this;
+    _logger.fine('polling got data $data');
+    var callback = (packet, [index, total]) {
+      // if its the first message we consider the transport open
+      if ('opening' == self.readyState) {
+        self.onOpen();
+      }
+
+      // if its a close packet, we close the ongoing requests
+      if ('close' == packet['type']) {
+        self.onClose();
+        return false;
+      }
+
+      // otherwise bypass onData and handle the message
+      self.onPacket(packet);
+      return null;
+    };
+
+    // decode payload
+    PacketParser.decodePayload(data,
+        binaryType: socket?.binaryType != true, callback: callback);
+
+    // if an event did not trigger closing
+    if ('closed' != readyState) {
+      // if we got data we're not polling
+      polling = false;
+      emit('pollComplete');
+
+      if ('open' == readyState) {
+        poll();
+      } else {
+        _logger.fine('ignoring poll - transport state "$readyState"');
+      }
+    }
   }
 
   ///
@@ -102,96 +174,6 @@ abstract class PollingTransport extends Transport {
   }
 
   ///
-  /// Overloads onData to detect payloads.
-  ///
-  /// @api private
-  @override
-  void onData(data) {
-    var self = this;
-    _logger.fine('polling got data $data');
-    var callback = (packet, [index, total]) {
-      // if its the first message we consider the transport open
-      if ('opening' == self.readyState) {
-        self.onOpen();
-      }
-
-      // if its a close packet, we close the ongoing requests
-      if ('close' == packet['type']) {
-        self.onClose();
-        return false;
-      }
-
-      // otherwise bypass onData and handle the message
-      self.onPacket(packet);
-      return null;
-    };
-
-    // decode payload
-    PacketParser.decodePayload(data,
-        binaryType: socket?.binaryType != true, callback: callback);
-
-    // if an event did not trigger closing
-    if ('closed' != readyState) {
-      // if we got data we're not polling
-      polling = false;
-      emit('pollComplete');
-
-      if ('open' == readyState) {
-        poll();
-      } else {
-        _logger.fine('ignoring poll - transport state "$readyState"');
-      }
-    }
-  }
-
-  ///
-  /// For polling, send a close packet.
-  ///
-  /// @api private
-  @override
-  void doClose() {
-    var self = this;
-
-    var close = ([_]) {
-      _logger.fine('writing close packet');
-      self.write([
-        {'type': 'close'}
-      ]);
-    };
-
-    if ('open' == readyState) {
-      _logger.fine('transport open - closing');
-      close();
-    } else {
-      // in case we're trying to close while
-      // handshaking is in progress (GH-164)
-      _logger.fine('transport not open - deferring close');
-      once('open', close);
-    }
-  }
-
-  ///
-  /// Writes a packets payload.
-  ///
-  /// @param {Array} data packets
-  /// @param {Function} drain callback
-  /// @api private
-  @override
-  void write(List packets) {
-    var self = this;
-    writable = false;
-    var callbackfn = (_) {
-      self.writable = true;
-      self.emit('drain');
-    };
-
-    PacketParser.encodePayload(packets, supportsBinary: supportsBinary != false,
-        callback: (data) {
-      self.doWrite(data, callbackfn);
-    });
-  }
-
-  ///
   /// Generates uri for connection.
   ///
   /// @api private
@@ -233,6 +215,24 @@ abstract class PollingTransport extends Transport {
         queryString;
   }
 
-  void doWrite(data, callback);
-  void doPoll();
+  ///
+  /// Writes a packets payload.
+  ///
+  /// @param {Array} data packets
+  /// @param {Function} drain callback
+  /// @api private
+  @override
+  void write(List packets) {
+    var self = this;
+    writable = false;
+    var callbackfn = (_) {
+      self.writable = true;
+      self.emit('drain');
+    };
+
+    PacketParser.encodePayload(packets, supportsBinary: supportsBinary != false,
+        callback: (data) {
+      self.doWrite(data, callbackfn);
+    });
+  }
 }

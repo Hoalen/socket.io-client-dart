@@ -5,14 +5,14 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:logging/logging.dart';
-import 'package:socket_io_common/src/util/event_emitter.dart';
+import 'package:old_socket_io_client/src/engine/socket.dart' as engine_socket;
+import 'package:old_socket_io_client/src/on.dart';
+import 'package:old_socket_io_client/src/on.dart' as util;
+import 'package:old_socket_io_client/src/socket.dart';
 import 'package:socket_io_common/src/parser/parser.dart';
-import 'package:socket_io_client/src/on.dart';
-import 'package:socket_io_client/src/socket.dart';
-import 'package:socket_io_client/src/engine/socket.dart' as engine_socket;
-import 'package:socket_io_client/src/on.dart' as util;
+import 'package:socket_io_common/src/util/event_emitter.dart';
 
-final Logger _logger = Logger('socket_io_client:Manager');
+final Logger _logger = Logger('old_socket_io_client:Manager');
 
 ///
 /// `Manager` constructor.
@@ -90,42 +90,8 @@ class Manager extends EventEmitter {
     if (autoConnect) open();
   }
 
-  ///
-  /// Propagate given event to sockets and emit on `this`
-  ///
-  /// @api private
-  ///
-  void emitAll(String event, [data]) {
-    emit(event, data);
-    for (var nsp in nsps.keys) {
-      nsps[nsp]!.emit(event, data);
-    }
-  }
-
-  ///
-  /// Update `socket.id` of all sockets
-  ///
-  /// @api private
-  ///
-  void updateSocketIds() {
-    for (var nsp in nsps.keys) {
-      nsps[nsp]!.id = generateId(nsp);
-    }
-  }
-
-  ///
-  /// generate `socket.id` for the given `nsp`
-  ///
-  /// @param {String} nsp
-  /// @return {String}
-  /// @api private
-  ///
-  String generateId(String nsp) {
-    if (nsp.startsWith('/')) nsp = nsp.substring(1);
-    return (nsp.isEmpty ? '' : (nsp + '#')) + (engine.id ?? '');
-  }
-
   num? get randomizationFactor => _randomizationFactor;
+
   set randomizationFactor(num? v) {
     _randomizationFactor = v;
     backoff?.jitter = v;
@@ -139,35 +105,39 @@ class Manager extends EventEmitter {
   /// @api public
   ///
   num? get reconnectionDelayMax => _reconnectionDelayMax;
+
   set reconnectionDelayMax(num? v) {
     _reconnectionDelayMax = v;
     backoff?.max = v;
   }
 
   ///
-  /// Starts trying to reconnect if reconnection is enabled and we have not
-  /// started reconnecting yet
+  /// Clean up transport subscriptions and packet buffer.
   ///
   /// @api private
   ///
-  void maybeReconnectOnOpen() {
-    // Only try to reconnect if it's the first time we're connecting
-    if (!reconnecting && reconnection == true && backoff!.attempts == 0) {
-      // keeps reconnection from firing twice for the same reconnection loop
-      reconnect();
+  void cleanup() {
+    _logger.fine('cleanup');
+
+    var subsLength = subs.length;
+    for (var i = 0; i < subsLength; i++) {
+      var sub = subs.removeAt(0);
+      sub.destroy();
     }
+
+    packetBuffer = [];
+    encoding = false;
+    lastPing = null;
+
+    decoder.destroy();
   }
 
   ///
-  /// Sets the current transport `socket`.
+  /// Close the current socket.
   ///
-  /// @param {Function} optional, callback
-  /// @return {Manager} self
-  /// @api public
+  /// @api private
   ///
-  Manager open({callback, Map? opts}) =>
-      connect(callback: callback, opts: opts);
-
+  void close() => disconnect();
   Manager connect({callback, Map? opts}) {
     _logger.fine('readyState $readyState');
     if (readyState.contains('open')) return this;
@@ -222,6 +192,116 @@ class Manager extends EventEmitter {
   }
 
   ///
+  /// Called upon a socket close.
+  ///
+  /// @param {Socket} socket
+  ///
+  void destroy(socket) {
+    connecting.remove(socket);
+    if (connecting.isNotEmpty) return;
+
+    close();
+  }
+
+  void disconnect() {
+    _logger.fine('disconnect');
+    skipReconnect = true;
+    reconnecting = false;
+    if ('opening' == readyState) {
+      // `onclose` will not fire because
+      // an open event never happened
+      cleanup();
+    }
+    backoff!.reset();
+    readyState = 'closed';
+    engine.close();
+  }
+
+  ///
+  /// Propagate given event to sockets and emit on `this`
+  ///
+  /// @api private
+  ///
+  void emitAll(String event, [data]) {
+    emit(event, data);
+    for (var nsp in nsps.keys) {
+      nsps[nsp]!.emit(event, data);
+    }
+  }
+
+  ///
+  /// generate `socket.id` for the given `nsp`
+  ///
+  /// @param {String} nsp
+  /// @return {String}
+  /// @api private
+  ///
+  String generateId(String nsp) {
+    if (nsp.startsWith('/')) nsp = nsp.substring(1);
+    return (nsp.isEmpty ? '' : (nsp + '#')) + (engine.id ?? '');
+  }
+
+  ///
+  /// Starts trying to reconnect if reconnection is enabled and we have not
+  /// started reconnecting yet
+  ///
+  /// @api private
+  ///
+  void maybeReconnectOnOpen() {
+    // Only try to reconnect if it's the first time we're connecting
+    if (!reconnecting && reconnection == true && backoff!.attempts == 0) {
+      // keeps reconnection from firing twice for the same reconnection loop
+      reconnect();
+    }
+  }
+
+  ///
+  /// Called upon engine close.
+  ///
+  /// @api private
+  ///
+  void onclose(error) {
+    _logger.fine('onclose');
+
+    cleanup();
+    backoff!.reset();
+    readyState = 'closed';
+    emit('close', error['reason']);
+
+    if (reconnection == true && !skipReconnect!) {
+      reconnect();
+    }
+  }
+
+  ///
+  /// Called with data.
+  ///
+  /// @api private
+  ///
+  void ondata(data) {
+    decoder.add(data);
+  }
+
+  ///
+  /// Called when parser fully decodes a packet.
+  ///
+  /// @api private
+  ///
+  void ondecoded(packet) {
+    emit('packet', packet);
+  }
+
+  ///
+  /// Called upon socket error.
+  ///
+  /// @api private
+  ///
+  void onerror(err) {
+    _logger.fine('error $err');
+    emitAll('error', err);
+  }
+
+  ///
   /// Called upon transport open.
   ///
   /// @api private
@@ -266,76 +346,27 @@ class Manager extends EventEmitter {
   }
 
   ///
-  /// Called with data.
+  /// Called upon successful reconnect.
   ///
   /// @api private
   ///
-  void ondata(data) {
-    decoder.add(data);
+  void onreconnect() {
+    var attempt = backoff!.attempts;
+    reconnecting = false;
+    backoff!.reset();
+    updateSocketIds();
+    emitAll('reconnect', attempt);
   }
 
   ///
-  /// Called when parser fully decodes a packet.
+  /// Sets the current transport `socket`.
   ///
-  /// @api private
-  ///
-  void ondecoded(packet) {
-    emit('packet', packet);
-  }
-
-  ///
-  /// Called upon socket error.
-  ///
-  /// @api private
-  ///
-  void onerror(err) {
-    _logger.fine('error $err');
-    emitAll('error', err);
-  }
-
-  ///
-  /// Creates a socket for the given `nsp`.
-  ///
-  /// @return {Socket}
+  /// @param {Function} optional, callback
+  /// @return {Manager} self
   /// @api public
   ///
-  Socket socket(String nsp, Map opts) {
-    var socket = nsps[nsp];
-
-    var onConnecting = ([_]) {
-      if (!connecting.contains(socket)) {
-        connecting.add(socket);
-      }
-    };
-
-    if (socket == null) {
-      socket = Socket(this, nsp, opts);
-      nsps[nsp] = socket;
-      socket.on('connecting', onConnecting);
-      socket.on('connect', (_) {
-        socket!.id = generateId(nsp);
-      });
-
-      if (autoConnect) {
-        // manually call here since connecting event is fired before listening
-        onConnecting();
-      }
-    }
-
-    return socket;
-  }
-
-  ///
-  /// Called upon a socket close.
-  ///
-  /// @param {Socket} socket
-  ///
-  void destroy(socket) {
-    connecting.remove(socket);
-    if (connecting.isNotEmpty) return;
-
-    close();
-  }
+  Manager open({callback, Map? opts}) =>
+      connect(callback: callback, opts: opts);
 
   ///
   /// Writes a packet.
@@ -375,66 +406,6 @@ class Manager extends EventEmitter {
     if (packetBuffer.isNotEmpty && encoding != true) {
       var pack = packetBuffer.removeAt(0);
       packet(pack);
-    }
-  }
-
-  ///
-  /// Clean up transport subscriptions and packet buffer.
-  ///
-  /// @api private
-  ///
-  void cleanup() {
-    _logger.fine('cleanup');
-
-    var subsLength = subs.length;
-    for (var i = 0; i < subsLength; i++) {
-      var sub = subs.removeAt(0);
-      sub.destroy();
-    }
-
-    packetBuffer = [];
-    encoding = false;
-    lastPing = null;
-
-    decoder.destroy();
-  }
-
-  ///
-  /// Close the current socket.
-  ///
-  /// @api private
-  ///
-  void close() => disconnect();
-
-  void disconnect() {
-    _logger.fine('disconnect');
-    skipReconnect = true;
-    reconnecting = false;
-    if ('opening' == readyState) {
-      // `onclose` will not fire because
-      // an open event never happened
-      cleanup();
-    }
-    backoff!.reset();
-    readyState = 'closed';
-    engine.close();
-  }
-
-  ///
-  /// Called upon engine close.
-  ///
-  /// @api private
-  ///
-  void onclose(error) {
-    _logger.fine('onclose');
-
-    cleanup();
-    backoff!.reset();
-    readyState = 'closed';
-    emit('close', error['reason']);
-
-    if (reconnection == true && !skipReconnect!) {
-      reconnect();
     }
   }
 
@@ -485,16 +456,46 @@ class Manager extends EventEmitter {
   }
 
   ///
-  /// Called upon successful reconnect.
+  /// Creates a socket for the given `nsp`.
+  ///
+  /// @return {Socket}
+  /// @api public
+  ///
+  Socket socket(String nsp, Map opts) {
+    var socket = nsps[nsp];
+
+    var onConnecting = ([_]) {
+      if (!connecting.contains(socket)) {
+        connecting.add(socket);
+      }
+    };
+
+    if (socket == null) {
+      socket = Socket(this, nsp, opts);
+      nsps[nsp] = socket;
+      socket.on('connecting', onConnecting);
+      socket.on('connect', (_) {
+        socket!.id = generateId(nsp);
+      });
+
+      if (autoConnect) {
+        // manually call here since connecting event is fired before listening
+        onConnecting();
+      }
+    }
+
+    return socket;
+  }
+
+  ///
+  /// Update `socket.id` of all sockets
   ///
   /// @api private
   ///
-  void onreconnect() {
-    var attempt = backoff!.attempts;
-    reconnecting = false;
-    backoff!.reset();
-    updateSocketIds();
-    emitAll('reconnect', attempt);
+  void updateSocketIds() {
+    for (var nsp in nsps.keys) {
+      nsps[nsp]!.id = generateId(nsp);
+    }
   }
 }
 
@@ -541,20 +542,11 @@ class _Backoff {
   }
 
   ///
-  /// Reset the number of attempts.
+  /// Set the jitter
   ///
   /// @api public
   ///
-  void reset() {
-    attempts = 0;
-  }
-
-  ///
-  /// Set the minimum duration
-  ///
-  /// @api public
-  ///
-  set min(min) => _ms = min;
+  set jitter(jitter) => _jitter = jitter;
 
   ///
   /// Set the maximum duration
@@ -564,9 +556,18 @@ class _Backoff {
   set max(max) => _max = max;
 
   ///
-  /// Set the jitter
+  /// Set the minimum duration
   ///
   /// @api public
   ///
-  set jitter(jitter) => _jitter = jitter;
+  set min(min) => _ms = min;
+
+  ///
+  /// Reset the number of attempts.
+  ///
+  /// @api public
+  ///
+  void reset() {
+    attempts = 0;
+  }
 }
